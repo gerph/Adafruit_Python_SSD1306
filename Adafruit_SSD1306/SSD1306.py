@@ -79,6 +79,9 @@ class SSD1306Base(object):
         self.height = height
         self._pages = height//8
         self._buffer = [0]*(width*self._pages)
+        # Clear our cache to different values to make it refresh
+        self._last_buffer = [1]*(width*self._pages)
+
         # Default to platform GPIO if not provided.
         self._gpio = gpio
         if self._gpio is None:
@@ -162,8 +165,8 @@ class SSD1306Base(object):
         # Set reset high again.
         self._gpio.set_high(self._rst)
 
-    def display(self):
-        """Write display buffer to physical display."""
+    def display_all(self):
+        """Write display buffer to physical display (writing the entire buffer)."""
         self.command(SSD1306_COLUMNADDR)
         self.command(0)              # Column start address. (0 = reset)
         self.command(self.width-1)   # Column end address.
@@ -180,6 +183,46 @@ class SSD1306Base(object):
             for i in range(0, len(self._buffer), 16):
                 control = 0x40   # Co = 0, DC = 0
                 self._i2c.writeList(control, self._buffer[i:i+16])
+
+    def display(self):
+        """Write display buffer to physical display (writing only changed pages)."""
+        if self._buffer == self._last_buffer:
+            return
+
+        self.command(SSD1306_COLUMNADDR)
+        self.command(0)              # Column start address. (0 = reset)
+        self.command(self.width-1)   # Column end address.
+        # Write buffer data.
+        if self._spi is not None:
+            def write_data(data):
+                # Set DC high for data.
+                self._gpio.set_high(self._dc)
+                # Write buffer.
+                self._spi.write(data)
+        else:
+            def write_data(data):
+                chunk_size = 48
+                for i in range(0, len(data), chunk_size):
+                    control = 0x40   # Co = 0, DC = 0
+                    self._i2c.writeList(control, data[i:i+chunk_size])
+
+        last_page_number = -2
+        # Optimised to just the pages we're interested in - interested in fewer transfers
+        for page_number in range(0, self._pages):
+            page_data = self._buffer[page_number * self.width:page_number * self.width + self.width]
+            last_page_data = self._last_buffer[page_number * self.width:page_number * self.width + self.width]
+            if page_data != last_page_data:
+                # Only refresh the page if the data has changed
+                if last_page_number + 1 != page_number:
+                    # We're on a new page, so we need to tell the controller which one
+                    self.command(SSD1306_PAGEADDR)
+                    self.command(page_number)    # Page we want to write to
+                    self.command(self._pages-1)  # Page end address.
+
+                # Now write the data
+                write_data(page_data)
+                last_page_number = page_number
+        self._last_buffer = list(self._buffer)
 
     def image(self, image):
         """Set buffer to value of Python Imaging Library image.  The image should
